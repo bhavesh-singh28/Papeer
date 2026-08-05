@@ -2,19 +2,20 @@ import os
 from typing import Generator
 
 from dotenv import load_dotenv
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from tavily import TavilyClient
-
-from backend.models import BtwRouteDecision
 
 load_dotenv()
-
-llm = ChatOpenAI(model="gpt-5-mini")
 
 
 def handle_btw(query: str) -> Generator[str, None, None]:
     """Off-topic side channel — never touches the vector store or checkpointer."""
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from tavily import TavilyClient
+    from backend.models import BtwRouteDecision
+    from backend.utils import safe_get_text
+
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
+
     route_prompt = ChatPromptTemplate.from_messages([
         ("system",
          "Decide if answering this question requires a real-time web search (recent events, "
@@ -42,5 +43,6 @@ def handle_btw(query: str) -> Generator[str, None, None]:
         ])
 
     for chunk in (answer_prompt | llm).stream({"query": query}):
-        if chunk.content:
-            yield chunk.content
+        text = safe_get_text(chunk.content)
+        if text:
+            yield text

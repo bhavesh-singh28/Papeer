@@ -5,28 +5,18 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import  ChatGoogleGenerativeAI
 
-from backend.btw_handler import handle_btw
-from backend.paper_loader import load_arxiv, load_document, load_webpage
-from backend.rag_graph import build_graph
-from backend.vector_store import add_paper, list_papers
-
+# Page config must be set first before any other streamlit commands
 st.set_page_config(page_title="Papeer", page_icon="📚", layout="centered")
 
 
 @st.cache_resource
 def get_graph():
+    from backend.rag_graph import build_graph
     return build_graph()
 
 
 SESSIONS_FILE = Path("sessions.json")
-
-# _rename_llm = ChatOpenAI(model="gpt-5-mini")
-_rename_llm = ChatGoogleGenerativeAI(model="models/gpt-5-mini")
-
 
 def load_sessions() -> dict:
     try:
@@ -66,6 +56,9 @@ def _serialize_state(values: dict) -> dict:
 
 def generate_session_name(first_message: str) -> str:
     try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from backend.utils import safe_get_text
+        _rename_llm = ChatGoogleGenerativeAI(model="models/gemini-3.1-flash-lite")
         response = _rename_llm.invoke(
             [
                 {
@@ -79,7 +72,7 @@ def generate_session_name(first_message: str) -> str:
                 {"role": "user", "content": first_message[:500]},
             ]
         )
-        return response.content.strip()
+        return safe_get_text(response.content).strip()
     except Exception:
         return "New Session"
 
@@ -110,6 +103,7 @@ def create_session() -> str:
 def load_session_chats(session_id: str) -> list[dict]:
     config = {"configurable": {"thread_id": session_id}}
     try:
+        from backend.utils import safe_get_text
         state = graph.get_state(config)
         if not state or not state.values:
             return []
@@ -117,7 +111,7 @@ def load_session_chats(session_id: str) -> list[dict]:
         turn = 0
         for msg in state.values.get("messages", []):
             type_name = type(msg).__name__
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            content = safe_get_text(msg.content)
             if type_name == "HumanMessage":
                 chats.append({"role": "user", "content": content})
             elif type_name in ("AIMessage", "AIMessageChunk"):
@@ -206,6 +200,8 @@ with st.sidebar:
             if processed_key not in st.session_state:
                 st.session_state[processed_key] = set()
             with st.spinner("Processing files…"):
+                from backend.paper_loader import load_document
+                from backend.vector_store import add_paper
                 for f in uploaded_files:
                     if f.name in st.session_state[processed_key]:
                         st.info(f"Already loaded: {f.name}")
@@ -244,6 +240,8 @@ with st.sidebar:
         urls = [u.strip() for u in url_input.splitlines() if u.strip()]
         if urls:
             with st.spinner("Loading web pages…"):
+                from backend.paper_loader import load_webpage
+                from backend.vector_store import add_paper
                 for url in urls:
                     try:
                         docs = load_webpage(url)
@@ -267,6 +265,8 @@ with st.sidebar:
         if arxiv_title.strip():
             with st.spinner("Loading from ArXiv…"):
                 try:
+                    from backend.paper_loader import load_arxiv
+                    from backend.vector_store import add_paper
                     docs = load_arxiv(arxiv_title.strip())
                     add_paper(docs, active_sid)
                     loaded_title = docs[0].metadata.get("title") if docs else arxiv_title.strip()
@@ -280,12 +280,18 @@ with st.sidebar:
     # ── Loaded Documents list ──────────────────────────────────────────────────
     st.divider()
     st.markdown("### Loaded Documents")
+    qdrant_online = True
     try:
+        from backend.vector_store import list_papers
         doc_titles = list_papers(active_sid)
-    except Exception:
+    except Exception as e:
         doc_titles = None
+        qdrant_online = False
+        st.error("⚠️ Connection to Qdrant Cloud timed out or failed. Please check your `.env` settings or ensure your cluster is not paused.")
+
     if doc_titles is None:
-        st.caption("Could not load document list — try refreshing.")
+        if qdrant_online:
+            st.caption("Could not load document list — try refreshing.")
     elif doc_titles:
         for title in doc_titles:
             st.markdown(f"- {title}")
@@ -325,6 +331,7 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
             if not query:
                 st.markdown("Please add a question after `/btw`, e.g. `/btw What is attention?`")
             else:
+                from backend.btw_handler import handle_btw
                 placeholder = st.empty()
                 response_text = ""
                 for chunk in handle_btw(query):
@@ -350,6 +357,8 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
         if is_first_message:
             maybe_rename_session(active_sid, prompt)
 
+        from langchain_core.messages import HumanMessage
+        from backend.utils import safe_get_text
         input_state = {
             "messages": [HumanMessage(content=prompt)],
             "session_id": active_sid,
@@ -370,35 +379,48 @@ if prompt := st.chat_input("Ask about your papers, verify a claim, or search the
             placeholder = st.empty()
             response_text = ""
 
-            for chunk, metadata in graph.stream(input_state, config, stream_mode="messages"):
-                if (
-                    metadata.get("langgraph_node") == "generate_answer"
-                    and hasattr(chunk, "content")
-                    and chunk.content
-                ):
-                    response_text += chunk.content
-                    placeholder.markdown(response_text + "▌")
+            try:
+                for chunk, metadata in graph.stream(input_state, config, stream_mode="messages"):
+                    if (
+                        metadata.get("langgraph_node") == "generate_answer"
+                        and hasattr(chunk, "content")
+                        and chunk.content
+                    ):
+                        response_text += safe_get_text(chunk.content)
+                        placeholder.markdown(response_text + "▌")
 
-            if not response_text:
+                if not response_text:
+                    final_values = graph.get_state(config).values
+                    response_text = safe_get_text(final_values.get("answer")) or "No response generated."
+
+                placeholder.markdown(response_text)
+
                 final_values = graph.get_state(config).values
-                response_text = final_values.get("answer") or "No response generated."
+                state_snapshot = _serialize_state(final_values)
 
-            placeholder.markdown(response_text)
+                with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
+                    st.json(state_snapshot)
 
-            final_values = graph.get_state(config).values
-            state_snapshot = _serialize_state(final_values)
+                st.session_state.chats[active_sid].append(
+                    {
+                        "role": "assistant",
+                        "content": response_text,
+                        "graph_state": state_snapshot,
+                        "turn": current_turn,
+                    }
+                )
 
-            with st.expander(f"📊 Graph state · turn {current_turn}", expanded=False):
-                st.json(state_snapshot)
-
-        st.session_state.chats[active_sid].append(
-            {
-                "role": "assistant",
-                "content": response_text,
-                "graph_state": state_snapshot,
-                "turn": current_turn,
-            }
-        )
+            except Exception as e:
+                error_msg = f"An error occurred while executing the graph: {e}"
+                placeholder.error(error_msg)
+                st.session_state.chats[active_sid].append(
+                    {
+                        "role": "assistant",
+                        "content": f"⚠️ {error_msg}",
+                        "graph_state": {},
+                        "turn": current_turn,
+                    }
+                )
 
         if is_first_message:
             st.rerun()

@@ -100,13 +100,15 @@ All keys are loaded from a `.env` file in the project root via `python-dotenv`.
 
 | Variable | Purpose | Where to Get It |
 |---|---|---|
-| `OPENAI_API_KEY` | LLM inference (`gpt-5-mini`) and embeddings (`text-embedding-3-small`) | [platform.openai.com](https://platform.openai.com) |
+| `GOOGLE_API_KEY` | LLM inference (`gemini-3.1-flash-lite`) and embeddings (`text-embedding-004`) | [aistudio.google.com](https://aistudio.google.com) |
+| `OPENAI_API_KEY` | LLM evaluation in DeepEval (`gpt-4o-mini`) | [platform.openai.com](https://platform.openai.com) |
 | `TAVILY_API_KEY` | Web search for current developments and claim verification | [tavily.com](https://tavily.com) |
 | `QDRANT_URL` | Qdrant Cloud endpoint for the vector store | [cloud.qdrant.io](https://cloud.qdrant.io) |
 | `QDRANT_API_KEY` | Authentication for Qdrant Cloud | [cloud.qdrant.io](https://cloud.qdrant.io) |
 
 `.env` file format:
 ```env
+GOOGLE_API_KEY=AIzaSy...
 OPENAI_API_KEY=sk-...
 TAVILY_API_KEY=tvly-...
 QDRANT_URL=https://your-cluster.qdrant.io

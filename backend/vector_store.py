@@ -1,50 +1,50 @@
 import os
 
 from dotenv import load_dotenv
-from langchain_classic.embeddings import CacheBackedEmbeddings
-from langchain_classic.storage import LocalFileStore
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-
 load_dotenv()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-EMBEDDING_DIM = 1536  # text-embedding-3-small
+EMBEDDING_DIM = 3072  # gemini-embedding-001
 
-# ── Singletons ────────────────────────────────────────────────────────────────
+# ── Lazy Loaded Clients & Embeddings ──────────────────────────────────────────
 
-# base_embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-# embedding_file_store = LocalFileStore("./embedding_cache/")
-# embeddings = CacheBackedEmbeddings.from_bytes_store(
-#     base_embeddings,
-#     embedding_file_store,
-#     namespace=base_embeddings.model,
-#     query_embedding_cache=True,
-#     key_encoder="blake2b",
-# )
-
-#Google GenAI Embeddings (uncomment if you want to use Google GenAI instead of OpenAI)
-base_embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-3-small")   
-embedding_file_store = LocalFileStore("./embedding_cache/")
-embeddings = CacheBackedEmbeddings.from_bytes_store(
-    base_embeddings,
-    embedding_file_store,
-    namespace=base_embeddings.model,
-    query_embedding_cache=True,
-    key_encoder="blake2b",
-) 
+_embeddings = None
+_qdrant_client = None
 
 
-qdrant_client = QdrantClient(
-    url=os.environ["QDRANT_URL"],
-    api_key=os.environ["QDRANT_API_KEY"],
-    timeout=120,
-)
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        from langchain_classic.embeddings import CacheBackedEmbeddings
+        from langchain_classic.storage import LocalFileStore
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        base_embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+        embedding_file_store = LocalFileStore("./embedding_cache/")
+        _embeddings = CacheBackedEmbeddings.from_bytes_store(
+            base_embeddings,
+            embedding_file_store,
+            namespace=base_embeddings.model,
+            query_embedding_cache=True,
+            key_encoder="blake2b",
+        )
+    return _embeddings
+
+
+def get_qdrant_client(timeout: int = 60) -> "QdrantClient":
+    global _qdrant_client
+    if _qdrant_client is None:
+        from qdrant_client import QdrantClient
+        _qdrant_client = QdrantClient(
+            url=os.environ["QDRANT_URL"],
+            api_key=os.environ["QDRANT_API_KEY"],
+            timeout=timeout,
+        )
+    return _qdrant_client
 
 
 # ── Collection ───────────────────────────────────────────────────────────────
@@ -53,17 +53,21 @@ def get_collection_name(session_id: str) -> str:
     return f"papeer_{session_id.replace('-', '_')}"
 
 
-def get_vectorstore(session_id: str) -> QdrantVectorStore:
+def get_vectorstore(session_id: str):
+    from langchain_qdrant import QdrantVectorStore
+    from qdrant_client.models import Distance, VectorParams
+
     collection_name = get_collection_name(session_id)
-    if not qdrant_client.collection_exists(collection_name):
-        qdrant_client.create_collection(
+    client = get_qdrant_client()
+    if not client.collection_exists(collection_name):
+        client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
         )
     return QdrantVectorStore(
-        client=qdrant_client,
+        client=client,
         collection_name=collection_name,
-        embedding=embeddings,
+        embedding=get_embeddings(),
     )
 
 
@@ -75,13 +79,14 @@ def add_paper(docs: list[Document], session_id: str) -> None:
 
 def list_papers(session_id: str) -> list[str]:
     collection_name = get_collection_name(session_id)
-    if not qdrant_client.collection_exists(collection_name):
+    client = get_qdrant_client()
+    if not client.collection_exists(collection_name):
         return []
     seen: set[str] = set()
     titles: list[str] = []
     offset = None
     while True:
-        points, offset = qdrant_client.scroll(
+        points, offset = client.scroll(
             collection_name=collection_name,
             with_payload=True,
             limit=100,
@@ -99,3 +104,4 @@ def list_papers(session_id: str) -> list[str]:
 
 def search(query: str, session_id: str, k: int = 4) -> list[Document]:
     return get_vectorstore(session_id).similarity_search(query, k=k)
+

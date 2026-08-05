@@ -10,9 +10,6 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import InjectedToolCallId, tool
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, MessagesState, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode, tools_condition
 from langgraph.types import Command
@@ -23,10 +20,6 @@ from backend.models import ClaimVerificationResult, RelevancyDecision, RouterDec
 from backend.vector_store import search as vs_search
 
 load_dotenv()
-
-# llm = ChatOpenAI(model="gpt-5.4-mini")
-
-llm = ChatGoogleGenerativeAI(model="models/gpt-5.4-mini")
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -70,10 +63,10 @@ ROUTER_PROMPT = ChatPromptTemplate.from_messages([
     ("human", "{query}"),
 ])
 
-router_chain = ROUTER_PROMPT | llm.with_structured_output(RouterDecision)
-
-
 def router_node(state: RAGState) -> dict:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
+    router_chain = ROUTER_PROMPT | llm.with_structured_output(RouterDecision)
     query = state["messages"][-1].content
     decision: RouterDecision = router_chain.invoke({"query": query})
     return {"route": decision.route}
@@ -138,11 +131,7 @@ def web_search(
     ]
 
 
-# ── Retrieval agent singletons ────────────────────────────────────────────────
-
 RETRIEVAL_TOOLS = [retrieve_from_vectorstore, web_search]
-retrieval_llm = llm.bind_tools(RETRIEVAL_TOOLS, parallel_tool_calls=False)
-base_tool_node = ToolNode(RETRIEVAL_TOOLS)
 
 RETRIEVE_SYSTEM = (
     "You are a research assistant gathering context to answer a user's question about research papers.\n\n"
@@ -174,35 +163,10 @@ RELEVANCY_CHECK_SYSTEM = (
     "no useful information.\n\nBe lenient: if there is any substantive overlap, return true."
 )
 
-relevancy_llm = llm.with_structured_output(RelevancyDecision)
-
-QUERY_REWRITE_SYSTEM = (
-    "You are a query rewriting assistant for a research paper retrieval system. "
-    "The previous query failed to retrieve relevant document chunks. "
-    "Rewrite the query using more specific or alternative terminology, "
-    "domain-specific keywords, or a narrower sub-question.\n\n"
-    "Return ONLY the rewritten query as plain text. No explanation, no preamble."
-)
-
-
-# ── Nodes ─────────────────────────────────────────────────────────────────────
-
-def agent_node(state: RAGState) -> dict:
-    current_attempts = state.get("retrieval_attempts", 0)
-    # Once at the cap, use plain LLM so the agent cannot emit more tool calls.
-    # This prevents orphaned tool_call IDs from entering the persisted message history.
-    # retrieval llm --> tool call --> tool result
-    # llm --> no tools are bounded --> tool call
-    lm = llm if current_attempts >= MAX_RETRIEVAL_ATTEMPTS else retrieval_llm
-    messages = [{"role": "system", "content": RETRIEVE_SYSTEM}] + state["messages"]
-    response = lm.invoke(messages)
-    updates: dict = {"messages": [response]}
-    if getattr(response, "tool_calls", None):
-        updates["retrieval_attempts"] = current_attempts + 1
-    return updates
-
-
 def relevancy_check_node(state: RAGState) -> dict:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
+    relevancy_llm = llm.with_structured_output(RelevancyDecision)
     query = state["query"]
     docs = state.get("retrieved_docs") or []
     doc_snippets = "\n\n---\n\n".join(doc.page_content[:300] for doc in docs[:3])
@@ -219,7 +183,32 @@ def relevancy_check_node(state: RAGState) -> dict:
     return {"is_relevant": decision.is_relevant}
 
 
+def agent_node(state: RAGState) -> dict:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
+    retrieval_llm = llm.bind_tools(RETRIEVAL_TOOLS)
+    current_attempts = state.get("retrieval_attempts", 0)
+    lm = llm if current_attempts >= MAX_RETRIEVAL_ATTEMPTS else retrieval_llm
+    messages = [{"role": "system", "content": RETRIEVE_SYSTEM}] + state["messages"]
+    response = lm.invoke(messages)
+    updates: dict = {"messages": [response]}
+    if getattr(response, "tool_calls", None):
+        updates["retrieval_attempts"] = current_attempts + 1
+    return updates
+
+
+QUERY_REWRITE_SYSTEM = (
+    "You are a query rewriting assistant for a research paper retrieval system. "
+    "The previous query failed to retrieve relevant document chunks. "
+    "Rewrite the query using more specific or alternative terminology, "
+    "domain-specific keywords, or a narrower sub-question.\n\n"
+    "Return ONLY the rewritten query as plain text. No explanation, no preamble."
+)
+
+
 def query_rewrite_node(state: RAGState) -> dict:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
     original_query = state["query"]
     rewrite_count = state.get("rewrite_count", 0)
     response = llm.invoke([
@@ -250,10 +239,11 @@ CLAIM_ANALYSIS_PROMPT = (
     "- verdict_summary should be 1-2 sentences suitable for display to the user."
 )
 
-verification_llm = llm.with_structured_output(ClaimVerificationResult)
-
-
 def verify_claim_node(state: RAGState) -> dict:
+    from tavily import TavilyClient
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
+    verification_llm = llm.with_structured_output(ClaimVerificationResult)
     claim = state["messages"][-1].content
     tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
@@ -306,6 +296,8 @@ def verify_claim_node(state: RAGState) -> dict:
 
 
 def generate_answer_node(state: RAGState) -> dict:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite")
     route = state.get("route")
     query = state["query"]
 
@@ -388,12 +380,16 @@ def after_relevancy_routing(state: RAGState) -> str:
 
 
 def build_graph(db_path: str = "checkpoints.db"):
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.prebuilt import ToolNode
     conn = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
 
     graph = StateGraph(RAGState)
     graph.add_node("router", router_node)
     graph.add_node("agent_node", agent_node)
+    
+    base_tool_node = ToolNode(RETRIEVAL_TOOLS)
     graph.add_node("retrieval", base_tool_node)
     graph.add_node("relevancy_check", relevancy_check_node)
     graph.add_node("query_rewrite", query_rewrite_node)
